@@ -1,5 +1,5 @@
 from app.pipelines.base import Pipeline
-from app.pipelines.util import get_torch_device, get_model_dir
+from app.pipelines.util import get_torch_device, get_model_dir, SafetyChecker
 
 from diffusers import (
     AutoPipelineForImage2Image,
@@ -11,7 +11,7 @@ from safetensors.torch import load_file
 from huggingface_hub import file_download, hf_hub_download
 import torch
 import PIL
-from typing import List
+from typing import List, Tuple
 import logging
 import os
 
@@ -111,7 +111,14 @@ class ImageToImagePipeline(Pipeline):
                     "call may be slow if 'SFAST' is enabled."
                 )
 
-    def __call__(self, prompt: str, image: PIL.Image, **kwargs) -> List[PIL.Image]:
+        safety_checker_device = os.getenv("SAFETY_CHECKER_DEVICE", "cuda").lower()
+        self._safety_checker = SafetyChecker(device=safety_checker_device)
+
+    def __call__(
+        self, prompt: str, image: PIL.Image, **kwargs
+    ) -> Tuple[List[PIL.Image], List[bool]]:
+        safety_check = kwargs.pop("safety_check", False)
+
         seed = kwargs.pop("seed", None)
         if seed is not None:
             if isinstance(seed, int):
@@ -153,7 +160,14 @@ class ImageToImagePipeline(Pipeline):
                 # Default to 2step
                 kwargs["num_inference_steps"] = 2
 
-        return self.ldm(prompt, image=image, **kwargs).images
+        output = self.ldm(prompt, image=image, **kwargs)
+
+        if safety_check:
+            _, has_nsfw_concept = self._safety_checker.check_nsfw_images(output.images)
+        else:
+            has_nsfw_concept = [None] * len(output.images)
+
+        return output.images, has_nsfw_concept
 
     def __str__(self) -> str:
         return f"ImageToImagePipeline model_id={self.model_id}"
